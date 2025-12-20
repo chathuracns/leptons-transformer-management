@@ -86,28 +86,42 @@ This phase provides an AI-based engine that automatically detects thermal anomal
 #### FR2.1: AI-Based Anomaly Detection Engine
 - **Description:** Computer vision model for comparing new maintenance images with baseline images to detect thermal anomalies
 - **Implemented Features:**
-  - Computer vision model (classical or deep learning-based) for image comparison
-  - Detect thermal anomalies: temperature spikes, asymmetries, hotspot location changes
-  - Thresholding mechanism (fixed or adaptive) to flag anomalies
-  - Optimized model inference for responsive performance
-  - Modular integration for model evolution over time
-  - Metadata recording of all detection outputs
+  - AWS Lambda-based deep learning model for automated anomaly detection
+  - Model inference triggered through backend when reference image is uploaded
+  - Image conversion to Base64 format for Lambda invocation
+  - Detection outputs include confidence scores and bounding box coordinates
+  - Configurable thresholds for detection sensitivity:
+    - Default threshold: 0.1 (confidence score)
+    - IOU (Intersection over Union) threshold: 0.2 (for duplicate detection filtering)
+  - Adaptive threshold support: can be customized per inspection via `threshold` parameter
+  - Detected anomalies automatically assigned unique IDs and marked as "AI-generated"
+  - All detections logged in anomaly log for model improvement tracking
+
+**Technical Implementation:**
+- **Lambda Integration:** Backend calls AWS Lambda endpoint (`/prod/`) with image payload
+- **Coordinate Conversion:** Lambda returns bounding boxes in `[x1, y1, x2, y2]` format (top-left and bottom-right corners)
+- **Automatic Coordinate Transformation:** Backend converts to `[x_center, y_center, width, height]` format for frontend storage and display
+- **Anomaly Logging:** Each detection creates a log entry with detection metadata for Phase 3 feedback integration
 
 #### FR2.2: Side-by-Side Image Comparison View
 - **Description:** Interactive side-by-side display of new and baseline images with comparison controls
 - **Implemented Features:**
-  - Side-by-side display of maintenance and baseline images
+  - Frontend displays baseline and reference (maintenance) images side by side
   - Interactive controls: zoom, pan (click and drag), reset
-  - Visual highlighting of anomaly regions (bounding boxes, overlays, heatmaps)
+  - Visual highlighting of anomaly regions using bounding boxes
+  - Display of detected anomalies with confidence scores
   - Responsive image comparison interface
+  - Support for multiple anomaly visualizations per image
 
 #### FR2.3: Automatic Anomaly Marking
 - **Description:** Automatic annotation of images with detected anomalies and visual overlays
 - **Implemented Features:**
-  - Color-coded overlays or markers for detected anomalies
-  - Anomaly metadata display: pixel coordinates, anomaly size, severity score
-  - Confidence score or flag for uncertain detections
-  - Visual representation of detection results for user understanding
+  - Automatic visualization of detected anomalies on images
+  - Color-coded or highlighted bounding boxes for anomaly regions
+  - Anomaly metadata display: bounding box coordinates, severity, confidence score
+  - Confidence score (0-1 range) for uncertainty flagging
+  - Metadata fields: anomaly ID, detection type, class name, confidence
+  - Clear visual representation of AI-detected hotspots and deviations
 
 ---
 
@@ -127,34 +141,60 @@ This phase extends Phase 2 by enabling human-in-the-loop feedback with interacti
     - Annotation type (added/edited/deleted)
     - Optional comments or notes
     - Timestamp and user ID
+    - "madeBy" field: distinguishes between "AI-generated" and "User" annotations
   - Intuitive and user-friendly annotation interface
+
+**Coordinate System & Conversion:**
+- **Frontend Format:** Anomalies are stored and displayed using `[x_center, y_center, width, height]` format
+  - `x_center, y_center`: Center point of the anomaly bounding box
+  - `width, height`: Dimensions of the bounding box
+- **Backend Lambda Output Format:** AWS Lambda detection model returns coordinates as `[x1, y1, x2, y2]`
+  - `x1, y1`: Top-left corner of bounding box
+  - `x2, y2`: Bottom-right corner of bounding box
+- **Automatic Conversion:** Backend automatically converts Lambda output to frontend format using:
+  - `x_center = (x1 + x2) / 2`
+  - `y_center = (y1 + y2) / 2`
+  - `width = |x2 - x1|`
+  - `height = |y2 - y1|`
+- **User Annotations:** When users add or edit anomalies in the frontend, coordinates are sent in the storage format `[x_center, y_center, width, height]`
 
 #### FR3.2: Metadata and Annotation Persistence
 - **Description:** Storage and retrieval of all user annotations with complete metadata tracking
 - **Implemented Features:**
   - Capture and save all annotation changes in the backend
   - Store comprehensive metadata:
-    - User ID
-    - Timestamp
-    - Image ID
-    - Transformer ID
-    - Action taken
+    - User ID (who made the annotation)
+    - Timestamp (when annotation was made)
+    - Image ID (which inspection)
+    - Transformer ID (which transformer)
+    - Action taken (add/edit/delete)
   - Automatic reloading of existing annotations when revisiting an image
-  - Structured and queryable annotation storage (relational DB or NoSQL)
+  - Structured and queryable annotation storage in Supabase PostgreSQL database
+  - Separate anomalies list and anomalies log for tracking:
+    - `anomalies`: Current state of all anomalies
+    - `anomaliesLog`: Historical record of all changes for audit trail
 
 #### FR3.3: Feedback Integration for Model Improvement
 - **Description:** Feedback log system for capturing user corrections and annotations for model improvement
 - **Implemented Features:**
   - Feedback log including:
-    - Original AI-generated detections
-    - Final user-modified annotations
+    - Original AI-generated detections (with confidence scores)
+    - Final user-modified annotations (validated, corrected, or rejected)
+    - User comments and remarks
   - Training/validation data generation for model improvement
-  - Use user-modified annotations to improve AI model accuracy
-  - Exportable feedback log in JSON or CSV format with:
-    - Image ID
-    - Model-predicted anomalies
-    - Final accepted annotations
-    - Annotator metadata
+  - Exportable feedback log for batch training pipeline
+  - Anomaly log structure:
+    - Tracks all user corrections and modifications
+    - Records original AI detection vs. final user decision
+    - Enables identification of model weaknesses
+  - **Automatic Model Retraining:** 
+    - User annotations are captured in the anomaly log
+    - Anomaly data can be exported for AWS Batch training job
+    - Retraining triggered via `/api/retrain` endpoint
+    - Backend sends fire-and-forget POST to AWS Batch training endpoint
+    - Batch job processes annotated images and anomaly logs
+    - Improved model deployed back to Lambda for Phase 2 detection
+  - Feedback loops enable continuous model improvement from field data
 
 ---
 
@@ -203,34 +243,290 @@ The application is built on a modern, decoupled three-tier architecture, ensurin
 
 ### System Components
 
-1. **Frontend (Client-Side):** A responsive and interactive user interface built with **React**. It handles all user interactions and communicates with the backend via a REST API.
+1. **Frontend (Client-Side):** A responsive and interactive user interface built with **React/Next.js**. It handles all user interactions and communicates with the backend via a REST API using Axios HTTP client.
 
-2. **Backend (Server-Side):** A robust RESTful API developed with **Java Spring Boot**. It manages all business logic, data processing, validation, and orchestration between frontend and database.
+2. **Backend (Server-Side):** A robust RESTful API developed with **Java Spring Boot**. It manages all business logic, data processing, validation, and orchestration between frontend and external services.
 
-3. **Database & Storage:** We use **Supabase**, a Backend-as-a-Service platform.
-   - **Database:** PostgreSQL relational database for structured data (transformers, images, annotations, maintenance records)
-   - **Storage:** S3-compatible storage bucket for thermal image files
+3. **External Services:**
+   - **Supabase (Database & Storage):** PostgreSQL database and S3-compatible storage
+   - **AWS Lambda:** Real-time anomaly detection inference
+   - **AWS Batch:** Batch training for model improvement
 
-4. **Anomaly Detection Service:** Separate microservice (Lambda/containerized) for AI-based image analysis and anomaly detection.
+### Request-Response Flow & Layer Interaction
 
-### Data Flow Architecture
+#### Layer 1: Frontend (React/Next.js)
+The frontend initiates all operations by making HTTP requests to the backend.
 
-#### Image Upload Flow (Phase 1)
-1. User uploads image in React UI
-2. Frontend sends image + metadata to Spring Boot backend
-3. Backend authenticates request
-4. Image uploaded to Supabase S3, receives public URL
-5. Image metadata + URL saved to PostgreSQL
-6. Success response returned to frontend
+**Example Request Flow:**
+```
+Frontend Action → API Call → HTTP Request → Backend Controller
+```
 
-#### Anomaly Detection Flow (Phase 2-3)
-1. User triggers analysis on maintenance image
-2. Backend retrieves baseline and maintenance images
-3. Anomaly detection service processes image pair
-4. Detections stored in database with confidence scores
-5. User views detections in frontend UI
-6. User provides feedback/annotations (Phase 3)
-7. Annotations stored for model improvement
+**Frontend Implementation Details:**
+- Uses Axios to construct and send requests (GET, POST, PUT, DELETE, PATCH)
+- Includes request headers with authentication tokens
+- Sends request body as JSON or multipart/form-data
+- Handles response parsing and error handling
+- Updates component state based on response
+
+#### Layer 2: Backend Controller (Spring Boot)
+Controllers act as the entry point for all frontend requests. They receive HTTP requests, validate input, and delegate to services.
+
+**Controller Responsibilities:**
+- Extract parameters from request (path variables, query params, request body)
+- Basic validation of input data
+- Delegate actual business logic to service layer
+- Handle errors and return appropriate HTTP status codes
+- Return JSON responses to frontend
+
+**How Controllers Work:**
+1. Frontend sends HTTP request to a specific endpoint (e.g., POST /api/inspections)
+2. Spring matches the request to the appropriate controller method based on @RequestMapping and @PostMapping annotations
+3. Controller extracts all data from the request:
+   - Path variables (e.g., {id} from `/api/inspections/{id}`)
+   - Query parameters (e.g., ?status=completed)
+   - Request body (JSON or form data)
+4. Controller performs basic validation (e.g., checking if required fields are null)
+5. If validation fails, controller returns error response (400 Bad Request)
+6. If validation passes, controller calls the corresponding service method with the extracted data
+7. Service processes the request and returns a result
+8. Controller wraps the result in a ResponseEntity with appropriate HTTP status code
+9. Response is sent back to frontend as JSON
+
+#### Layer 3: Service Layer (Business Logic)
+Services contain the core business logic and handle interactions with database, external APIs, and other services.
+
+**Service Layer Responsibilities:**
+- Receive processed data from controller
+- Perform business logic operations
+- Interact with database (Supabase)
+- Call external services if needed (AWS Lambda, Batch)
+- Process and transform data
+- Return result to controller
+
+**How Services Work:**
+1. Controller calls service method with validated data
+2. Service executes the core business logic step-by-step
+3. Service may need to fetch data from database using Supabase REST API
+4. Service may call external services like AWS Lambda or AWS Batch
+5. Service processes responses and transforms data into required format
+6. Service performs any calculations, validations, or conversions
+7. Service returns result to controller
+8. Controller wraps result and sends to frontend
+
+#### Layer 4: External Services Integration
+For advanced features, services call external APIs and microservices.
+
+**AWS Lambda Integration (Phase 2 - Anomaly Detection):**
+The service layer orchestrates the following workflow:
+1. Service receives an inspection image upload from the controller
+2. Service uploads the image file to Supabase Storage bucket and gets a public URL
+3. Service reads the uploaded image file and converts it to Base64 encoded string
+4. Service creates a JSON payload containing:
+   - Base64-encoded image data
+   - Detection threshold (default 0.1, can be customized)
+   - IOU threshold (default 0.2 for filtering duplicate detections)
+5. Service makes an HTTP POST request to AWS Lambda endpoint with this payload
+6. AWS Lambda model processes the image and returns detected anomalies
+7. Lambda response includes:
+   - List of detections with confidence scores
+   - Bounding box coordinates in [x1, y1, x2, y2] format (top-left and bottom-right)
+   - Class names/types of detected anomalies
+8. Service receives Lambda response and iterates through each detection
+9. Service converts coordinates from [x1, y1, x2, y2] to [x_center, y_center, width, height] format
+10. Service assigns unique ID to each detection and marks as "AI-generated"
+11. Service creates anomaly log entries for audit trail
+12. Service returns all detections and logs to controller
+13. Controller sends complete inspection data (with detections) to frontend
+
+**Supabase Integration:**
+The service layer makes REST API calls to Supabase:
+1. Service constructs Supabase REST URL with table name and filters
+2. Service adds authentication headers (API key and Bearer token)
+3. Service makes HTTP GET/POST/PATCH/DELETE request via RestTemplate
+4. Supabase processes the request and returns JSON response
+5. Service parses the JSON response and handles any errors
+6. Service returns processed data to controller
+
+### Complete Request-Response Example: Creating an Inspection (Phase 2)
+
+**Step 1: Frontend Initiates Request**
+- User fills out an inspection form in the React UI with:
+  - Transformer number
+  - Inspection date
+  - Maintenance date
+  - Status
+  - Inspector name
+  - Reference image (thermal image file)
+- User clicks "Create Inspection" button
+- Frontend uses Axios to construct a multipart/form-data POST request
+- Request is sent to backend endpoint: `/api/inspections`
+- Request headers include authentication tokens and content type
+
+**Step 2: Backend Controller Receives Request**
+- Spring Boot routes the request to InspectionController
+- Controller method receives all form parameters:
+  - transformerNumber from form data
+  - inspectionNumber (optional) from form data
+  - Various date and status fields
+  - refImage as MultipartFile object
+- Controller validates that transformerNumber is not null or empty
+- If validation fails, controller returns 400 Bad Request error response
+- If validation passes, controller calls inspectionService.createInspection() with all parameters
+
+**Step 3: Service Layer Processes Request**
+- Service receives the inspection data from controller
+- Service first checks if inspectionNumber was provided by frontend
+- If not provided, service generates a unique inspection number (e.g., "I-123456")
+- Service checks if an image file was uploaded
+- If image exists:
+  - Service reads the image file bytes
+  - Service uploads image to Supabase Storage bucket
+  - Service receives a public URL pointing to stored image
+  - Service converts image to Base64 encoding
+  - Service creates JSON payload with Base64 image and threshold parameters
+  - Service makes HTTP POST request to AWS Lambda endpoint
+  - Service waits for Lambda response
+  - Lambda returns detected anomalies with coordinates and confidence scores
+  - Service converts coordinate format from [x1, y1, x2, y2] to [x_center, y_center, width, height]
+  - Service assigns unique IDs to each detection
+  - Service marks all detections as "AI-generated"
+  - Service creates log entries for each detection in anomalies log
+- Service prepares final inspection object with:
+  - Generated inspection number
+  - Transformer number
+  - Inspection date and maintenance date
+  - Image URL
+  - Detected anomalies list
+  - Anomalies log for audit trail
+  - Status and inspector information
+- Service makes HTTP POST request to Supabase with inspection data
+- Supabase creates new record in inspections table and returns the created record
+- Service returns the complete inspection record to controller
+
+**Step 4: Frontend Receives Response**
+- Frontend receives the response with created inspection data
+- Frontend parses the JSON response
+- Frontend displays success message to user
+- Frontend extracts the new inspection ID and anomalies list
+- Frontend renders the inspection details page
+- Frontend displays the thermal image with detected anomalies visualized as bounding boxes
+- Frontend updates the inspections list to include the newly created inspection
+- User can now view anomalies and proceed to annotate them (Phase 3)
+
+### Complete Request-Response Example: Updating Anomaly Annotation (Phase 3)
+
+**Step 1: Frontend Sends Updated Anomaly**
+- User views the inspection with detected anomalies displayed on the thermal image
+- User hovers over or selects an anomaly to edit it
+- User modifies the anomaly:
+  - Adjusts the bounding box position and size
+  - Updates comments (e.g., "User corrected hotspot location")
+  - Changes severity score
+- Frontend constructs the updated anomaly object with:
+  - Anomaly ID (unchanged)
+  - New bounding box coordinates in [x_center, y_center, width, height] format
+  - User comments
+  - Updated severity score
+  - "madeBy" marked as "User" (not AI)
+- Frontend uses Axios to send PUT request to `/api/inspections/{inspectionId}/anomalies/{anomalyId}`
+- Request body contains the updated anomaly object as JSON
+
+**Step 2: Controller Receives Update Request**
+- Spring Boot routes the request to InspectionController
+- Controller extracts:
+  - Inspection ID (iid) from URL path
+  - Anomaly ID from URL path
+  - Updated anomaly data from request body (JSON)
+- Controller validates that inspection ID and anomaly ID are valid
+- Controller calls inspectionService.updateAnomaly() with all three parameters
+- Controller catches any exceptions (like "anomaly not found") and returns appropriate error response
+
+**Step 3: Service Updates Anomaly in Database**
+- Service receives inspection ID and updated anomaly data from controller
+- Service retrieves the current inspection record from Supabase database
+- Service extracts the anomalies list and anomalies log from the inspection record
+- Service searches through the anomalies list to find the anomaly with matching ID
+- Service updates the found anomaly with new values:
+  - New bounding box coordinates
+  - New comments
+  - Updated severity score
+  - madeBy field set to "User"
+- Service creates a new log entry documenting this change:
+  - Anomaly ID being modified
+  - New bounding box coordinates
+  - Timestamp of change
+  - "madeBy" marked as "User"
+  - Action type marked as "edit"
+  - User comments included
+- Service adds this log entry to the anomaliesLog list
+- Service prepares update payload with:
+  - Updated anomalies list
+  - Updated anomaliesLog with new entry
+- Service makes HTTP PATCH request to Supabase to update the inspection record
+- Supabase updates the record and returns the updated inspection
+- Service returns the complete updated inspection record to controller
+
+**Step 4: Frontend Receives Updated Anomaly**
+- Frontend receives the response with updated inspection data
+- Frontend parses the JSON response
+- Frontend updates the local state with the new anomaly data
+- Frontend refreshes the visualization of anomalies on the thermal image
+- Anomaly display shows the new position/size if coordinates were changed
+- Frontend displays success message to user
+- User can now see the updated anomaly on the image
+- Updated anomaly is now marked as "User" contribution in the anomaly log
+- This information feeds back for model retraining (Phase 4)
+
+### Data Flow Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         FRONTEND (React/Next.js)                     │
+│  - User interacts with UI (clicks, uploads, edits)                  │
+│  - Constructs HTTP requests with Axios                              │
+│  - Displays received data and handles errors                         │
+└────────────────────────────┬────────────────────────────────────────┘
+                             │ HTTP Request (JSON/FormData)
+                             ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│           BACKEND CONTROLLER (Spring Boot @RestController)           │
+│  - Receives HTTP request                                             │
+│  - Validates path variables & query parameters                       │
+│  - Extracts request body                                             │
+│  - Delegates to Service layer                                        │
+│  - Returns HTTP Response                                             │
+└────────────────────────────┬────────────────────────────────────────┘
+                             │ Method call with processed data
+                             ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│            SERVICE LAYER (Business Logic @Service)                   │
+│  - Implements core business logic                                    │
+│  - Validates data integrity                                          │
+│  - Calls database APIs (Supabase)                                    │
+│  - Invokes external services (Lambda, Batch)                         │
+│  - Transforms and processes data                                     │
+│  - Returns results to Controller                                     │
+└────────────────────────────┬────────────────────────────────────────┘
+                             │
+                ┌────────────┴────────────┬──────────────┐
+                ▼                         ▼              ▼
+        ┌───────────────┐        ┌─────────────┐  ┌─────────────┐
+        │   SUPABASE    │        │ AWS LAMBDA  │  │ AWS BATCH   │
+        │  (Database &  │        │  (Anomaly   │  │ (Training)  │
+        │   Storage)    │        │ Detection)  │  │             │
+        └───────────────┘        └─────────────┘  └─────────────┘
+```
+
+### Error Handling & Response Codes
+
+Controllers return appropriate HTTP status codes:
+- **200 OK:** Request successful
+- **201 Created:** Resource created successfully
+- **400 Bad Request:** Invalid input data
+- **404 Not Found:** Resource not found
+- **500 Internal Server Error:** Server-side error
+- **503 Service Unavailable:** External service (Lambda, Supabase) unavailable
 
 ---
 
